@@ -1,0 +1,92 @@
+/* =========================== */
+/* Active non-templated orders */
+/* =========================== */
+create temp table active_nontemplate_orders as (
+select o.order_id 
+	 , o.orig_order_dt_tm
+	 , o.catalog_cd
+	 , o.catalog_type_cd
+	 , o.activity_type_cd 
+	 , o.order_status_cd 
+	 , o.ordered_as_mnemonic
+	 , o.clinical_display_line
+	 , o.encntr_id
+	 , o.person_id 
+from orders o 
+
+where o.active_ind = 1 
+ and o.template_order_id = 0.0 /* parent order */ 
+ and o.template_order_flag = 0.0 /* non-templated order */
+ /* Use the orig_ord_as_flag to disqualify prescriptions and home meds 
+    0-Normal order, 1-Prescription/Discharge Order, 2-Recorded/Home Meds, 4-Pharmacy Charge Only 5-Satellite (Super Bill). */ 
+ and o.orig_ord_as_flag not in (1,2) 
+ and o.order_status_cd in (select code_value from code_value where code_set = 6004 and cdf_meaning in ('ORDERED'))
+ order by o.orig_order_dt_tm asc
+);
+
+/* Assess the extent, based on a subset of the encounters */
+create temp table test_patients_active_nontemplate_orders as (
+select ato.*
+     , oc.print_req_ind as Req
+	 , cvreq.display as Req_Format
+	 , ordpr.name_full_formatted as Ordering_Provider
+     , p.name_full_formatted as Patient
+	 , e.reg_dt_tm
+from active_nontemplate_orders ato
+join order_catalog oc on oc.catalog_cd = ato.catalog_cd
+join code_value cvreq on cvreq.code_value = oc.requisition_format_cd
+join order_action oa on oa.order_id = ato.order_id
+join prsnl ordpr on ordpr.person_id =oa.order_provider_id
+join encounter e on e.encntr_id = ato.encntr_id
+/* Qualify encounter status here, if needed */
+/* For test patients we really don't care if encounter is discharged or not - we clean up all*/
+/* Get patient info for auditing purposes */
+join person p on p.person_id = e.person_id 
+ and p.active_ind = 1 
+ and p.end_effective_dt_tm > now() 
+/* Qualify test patients as needed */
+ and p.name_last like '%SYSTEM%'
+);
+
+/* Audit/Output query */
+select 'Yes' as Update_Order
+     , to_char(subset_ato.orig_order_dt_tm, 'DD-Mon-YYYY') as Anchor_Dt_Tm
+	 , subset_ato.order_id as Template_Order_id /*For non-templated orders, we feed the utility the order_id */
+     /* , case when catalogtypecd.definition in ('cer_exe:generic_shrorder','cer_exe:rx_shrorder')
+            then 'Direct Update of Child' 
+		    else ''
+	   end as Update_Child */
+	 , '' as Update_Child
+	 , pa.ALIAS as MRN
+	 , subset_ato.Patient as Patient
+	 , catalogtypecd.display as Catalog_Type
+	 , activitytypecd.display as Activity_Type 
+	 , parentorderstatus.display as Parent_Order_Status
+	 , subset_ato.ordered_as_mnemonic
+	 , subset_ato.clinical_display_line
+	 , subset_ato.Req
+	 , subset_ato.Req_Format
+	 , subset_ato.Ordering_Provider 
+	 , subset_ato.encntr_id
+	 , subset_ato.person_id
+	 , subset_ato.reg_dt_tm
+
+from test_patients_active_nontemplate_orders subset_ato /* Replace subset here */
+join code_value catalogtypecd on catalogtypecd.code_value = subset_ato.catalog_type_cd 
+ and catalogtypecd.code_set = 6000 
+ and catalogtypecd.active_ind = 1 
+join code_value activitytypecd on activitytypecd.code_value = subset_ato.activity_type_cd 
+ and activitytypecd.code_set = 106 
+ and activitytypecd.active_ind = 1
+join code_value parentorderstatus on parentorderstatus.code_value = subset_ato.order_status_cd  
+ and parentorderstatus.code_set = 6004 
+ 
+join person_alias pa on pa.person_id = subset_ato.person_id 
+ and pa.end_effective_dt_tm > now() 
+ and pa.active_ind = 1 
+join code_value aliaspoolcd on aliaspoolcd.code_value = pa.alias_pool_cd 
+ and aliaspoolcd.display = 'CHB_MRN' -- 3110551 
+ and aliaspoolcd.code_set = 263 
+ and aliaspoolcd.active_ind = 1
+order by MRN
+;
